@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -70,9 +70,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String _selectedCadre = 'AEN (Civil Engineering)';
   int _questionCount = 15;
 
-  File? _studyPdf;
+  Uint8List? _studyPdfBytes;
   String? _studyPdfName;
-  File? _pyqPdf;
+  Uint8List? _pyqPdfBytes;
   String? _pyqPdfName;
 
   bool _isLoading = false;
@@ -109,43 +109,54 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickPdf({required bool isStudyPdf}) async {
-    final result = await FilePicker.platform.pickFiles(
+    final picked = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: ['pdf'],
     );
-    if (result != null && result.files.single.path != null) {
-      final file = File(result.files.single.path!);
-      final sizeInMb = await file.length() / (1024 * 1024);
-      if (sizeInMb > 15.0) {
-        setState(() {
-          _errorMsg =
-              'Selected PDF is ${sizeInMb.toStringAsFixed(1)} MB. Please keep each PDF under 15 MB for inline mobile processing.';
-        });
-        return;
-      }
-      setState(() {
-        _errorMsg = null;
-        if (isStudyPdf) {
-          _studyPdf = file;
-          _studyPdfName = result.files.single.name;
-        } else {
-          _pyqPdf = file;
-          _pyqPdfName = result.files.single.name;
-        }
-      });
-    }
-  }
+    if (picked == null) return;
 
+    final int? byteLength = picked.lengthSync() ?? await picked.length();
+    if (byteLength != null && byteLength / (1024 * 1024) > 15.0) {
+      final sizeInMb = byteLength / (1024 * 1024);
+      setState(() {
+        _errorMsg =
+            'Selected PDF is ${sizeInMb.toStringAsFixed(1)} MB. Please keep each PDF under 15 MB for inline mobile processing.';
+      });
+      return;
+    }
+
+    final bytes = await picked.readAsBytes();
+    if (bytes.lengthInBytes / (1024 * 1024) > 15.0) {
+      final sizeInMb = bytes.lengthInBytes / (1024 * 1024);
+      setState(() {
+        _errorMsg =
+            'Selected PDF is ${sizeInMb.toStringAsFixed(1)} MB. Please keep each PDF under 15 MB for inline mobile processing.';
+      });
+      return;
+    }
+
+    setState(() {
+      _errorMsg = null;
+      if (isStudyPdf) {
+        _studyPdfBytes = bytes;
+        _studyPdfName = picked.name;
+      } else {
+        _pyqPdfBytes = bytes;
+        _pyqPdfName = picked.name;
+      }
+    });
+  }
   Future<void> _generateMcqs() async {
     final apiKey = _apiKeyController.text.trim();
     if (apiKey.isEmpty) {
       setState(() => _errorMsg = 'Please enter your Gemini API Key.');
       return;
     }
-    if (_studyPdf == null) {
+    if (_studyPdfBytes == null) {
       setState(() => _errorMsg = 'Please upload a Study Material / Rulebook PDF.');
       return;
     }
+
     await _saveApiKey(apiKey);
     setState(() {
       _isLoading = true;
@@ -153,8 +164,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final studyBytes = await _studyPdf!.readAsBytes();
-      final studyBase64 = base64Encode(studyBytes);
+      final studyBase64 = base64Encode(_studyPdfBytes!);
 
       final List<Map<String, dynamic>> parts = [
         {
@@ -165,12 +175,11 @@ class _HomeScreenState extends State<HomeScreen> {
         },
       ];
 
-      if (_pyqPdf != null) {
-        final pyqBytes = await _pyqPdf!.readAsBytes();
+      if (_pyqPdfBytes != null) {
         parts.add({
           'inlineData': {
             'mimeType': 'application/pdf',
-            'data': base64Encode(pyqBytes),
+            'data': base64Encode(_pyqPdfBytes!),
           }
         });
       }
@@ -180,10 +189,10 @@ You are an expert Indian Railways Group 'B' 30% LDCE Exam Paper Setter (Centrali
 Target Post: $_selectedCadre.
 
 Task:
-Analyze the attached Study Material PDF${_pyqPdf != null ? " AND the attached Previous Year Question Paper (PYQ) PDF" : ""}.
+Analyze the attached Study Material PDF${_pyqPdfBytes != null ? " AND the attached Previous Year Question Paper (PYQ) PDF" : ""}.
 Generate $_questionCount high-yield Multiple Choice Questions (MCQs) strictly grounded in the Study PDF, prioritized and weighted by PREVIOUS YEAR EXAM PROBABILITY for the Railway LDCE Assistant Officer CBT.
 
-${_pyqPdf != null ? "1. First extract the topic frequency, rule-citation style, and distractor traps from the PYQ PDF, and bias your generated MCQs toward the highest-frequency concepts present in the Study PDF." : "1. Apply historical Railway LDCE Group-B CBT probability weights: focus heavily on numerical limits, authority levels (GM/DRM/PHOD/JAG/SS), DAR 1968 standard forms (SF-1 to SF-11), IREM/IREC clauses, Pass/Leave rules, Financial & Store canons, Rajbhasha Articles 343-351 & Annual Programme targets, and technical tolerances/standards."}
+${_pyqPdfBytes != null ? "1. First extract the topic frequency, rule-citation style, and distractor traps from the PYQ PDF, and bias your generated MCQs toward the highest-frequency concepts present in the Study PDF." : "1. Apply historical Railway LDCE Group-B CBT probability weights: focus heavily on numerical limits, authority levels (GM/DRM/PHOD/JAG/SS), DAR 1968 standard forms (SF-1 to SF-11), IREM/IREC clauses, Pass/Leave rules, Financial & Store canons, Rajbhasha Articles 343-351 & Annual Programme targets, and technical tolerances/standards."}
 2. Include Railway CBT-style options (e.g., exact numeric limits, "Both A & B", "None of the above", rule exceptions) suitable for +1 / -1/3 negative marking.
 3. For each MCQ, provide an estimated probabilityPercent (1-100) and a brief probabilityReason explaining why it is likely to appear in the LDCE exam.
 4. Return ONLY valid JSON matching the requested schema.
@@ -241,12 +250,115 @@ ${_pyqPdf != null ? "1. First extract the topic frequency, rule-citation style, 
       if (response.statusCode != 200) {
         throw Exception('API Error (${response.statusCode}): ${response.body}');
       }
-
       final decoded = jsonDecode(response.body);
       final rawText =
           decoded['candidates'][0]['content']['parts'][0]['text'] as String;
       final List<dynamic> jsonList = jsonDecode(rawText);
-      child: const Text('Browse'),
+
+      final questions = jsonList
+          .map((e) => McqQuestion.fromJson(e as Map<String, dynamic>))
+          .toList()
+        ..sort((a, b) => b.probabilityPercent.compareTo(a.probabilityPercent));
+
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => QuizScreen(
+            questions: questions,
+            cadre: _selectedCadre,
+          ),
+        ),
+      );
+    } catch (e) {
+      setState(() => _errorMsg = 'Failed to generate MCQs: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Railway LDCE MCQ Engine'),
+        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '30% LDCE Group-B Assistant Officer CBT Prep',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _apiKeyController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Gemini API Key',
+                hintText: 'Get from aistudio.google.com',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.key),
+              ),
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: _selectedCadre,
+              decoration: const InputDecoration(
+                labelText: 'Target Assistant Officer Post',
+                border: OutlineInputBorder(),
+              ),
+              items: _cadres
+                  .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                  .toList(),
+              onChanged: (val) => setState(() => _selectedCadre = val!),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Text('Questions to generate: '),
+                Expanded(
+                  child: Slider(
+                    value: _questionCount.toDouble(),
+                    min: 5,
+                    max: 40,
+                    divisions: 7,
+                    label: '$_questionCount',
+                    onChanged: (v) => setState(() => _questionCount = v.round()),
+                  ),
+                ),
+                Text('$_questionCount',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
+                title: Text(_studyPdfName ?? '1. Upload Study / Rulebook PDF *'),
+                subtitle: const Text('Required (Max 15 MB)'),
+                trailing: ElevatedButton(
+                  onPressed: () => _pickPdf(isStudyPdf: true),
+                  child: const Text('Browse'),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.history_edu, color: Colors.indigo),
+                title: Text(
+                    _pyqPdfName ?? '2. Upload Past LDCE Paper PDF (Optional)'),
+                subtitle: const Text(
+                  'Boosts probability calibration using real past questions'),
+                trailing: ElevatedButton(
+                  onPressed: () => _pickPdf(isStudyPdf: false),
+                  child: const Text('Browse'),
                 ),
               ),
             ),
@@ -361,7 +473,7 @@ class _QuizScreenState extends State<QuizScreen> {
                             Chip(
                               label: Text(
                                   'PYQ Prob: ${q.probabilityPercent}%',
-                                style: const TextStyle(
+                                  style: const TextStyle(
                                       color: Colors.white, fontSize: 12)),
                               backgroundColor: _probColor(q.probabilityPercent),
                             ),
